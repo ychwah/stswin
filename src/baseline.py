@@ -1,118 +1,134 @@
-# Lightweight DBNet + Swin-T + FPNC for arbitrary-shape text
-# Dataset: Total-Text (train/test), 800 epochs
+# DBNet + Swin-T + FPNC on ICDAR2015 (800 epochs, MMOCR 1.x)
 
 _base_ = [
-    'mmocr::_base_/default_runtime.py',
-    'mmocr::_base_/det_pipelines.py',
+    '../_base_/datasets/icdar2015.py',   # <-- ICDAR2015 base
+    '../_base_/default_runtime.py',
+    '../dbnet/_base_dbnet_resnet18_fpnc.py',  # model defaults; we'll override below
 ]
 
 # ----------------------
-# Model
+# Model (Swin-T via MMDetection registry)
 # ----------------------
+# keep your _base_ list as-is (icdar2015 + default_runtime + dbnet base)
 model = dict(
+    _delete_=True,  # replace the base model entirely
     type='DBNet',
     data_preprocessor=dict(
         type='TextDetDataPreprocessor',
-        mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], bgr_to_rgb=True
+        pad_size_divisor=32,
+        bgr_to_rgb=True,
+        mean=[123.675, 116.28, 103.53],
+        std=[58.395, 57.12, 57.375],
     ),
-    backbone=dict(
-        type='SwinTransformer',
-        embed_dims=96, depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
-        window_size=7, mlp_ratio=4, qkv_bias=True, drop_path_rate=0.2,
-        out_indices=(0, 1, 2, 3), patch_norm=True,
+    backbone=dict(  # <-- no _delete_ here
+        type='mmdet.SwinTransformer',
+        embed_dims=96,
+        depths=[2, 2, 6, 2],
+        num_heads=[3, 6, 12, 24],
+        window_size=7,
+        mlp_ratio=4,
+        qkv_bias=True,
+        drop_path_rate=0.2,
+        patch_norm=True,
+        out_indices=(0, 1, 2, 3),
         init_cfg=dict(
             type='Pretrained',
-            checkpoint='https://download.openmmlab.com/mmclassification/v0/swin-transformer/swin-tiny_16xb64_in1k_20211123-1b40f1ed.pth'
-        )
+            #Load pretrained swin-t from openmmlab
+            checkpoint=('https://download.openmmlab.com/mmclassification/v0/swin-transformer/swin_tiny_224_b16x64_300e_imagenet_20210616_090925-66df6be6.pth')
+        ),
     ),
-    neck=dict(
+    neck=dict(  # <-- no _delete_ here
         type='FPNC',
         in_channels=[96, 192, 384, 768],
         lateral_channels=128,
-        out_channels=128
+        out_channels=128,
     ),
-    det_head=dict(
+    det_head=dict(  # <-- no _delete_ here
         type='DBHead',
         in_channels=128,
-        loss_module=dict(
-            type='DBLoss', balance_loss=True, main_loss_type='DiceLoss',
-            loss_prob=dict(type='DiceLoss', loss_weight=1.0),
-            loss_thresh=dict(type='L1Loss', loss_weight=10.0),
-            eps=1e-6
-        ),
+        module_loss=dict(type='DBModuleLoss'),  # keep only one loss entry
         postprocessor=dict(
             type='DBPostprocessor',
-            text_repr_type='poly',
+            text_repr_type='quad',   # ICDAR2015
             mask_thr=0.3,
             min_text_score=0.3,
             min_text_width=5,
-            unclip_ratio=1.5,
             max_candidates=2000,
-            box_thr=0.6
-        )
-    )
+            unclip_ratio=1.5,
+        ),
+    ),
 )
 
+
+
 # ----------------------
-# Pipelines (high-res + robust but simple augs)
+# Pipelines (preprocessor already normalizes -> no Normalize here)
 # ----------------------
 train_pipeline = [
     dict(type='LoadImageFromFile'),
-    dict(type='LoadOCRAnnotations', with_bbox=True, with_mask=True, with_label=False),
+    dict(type='LoadOCRAnnotations', with_bbox=True, with_polygon=True, with_label=True),
     dict(type='RandomResize', scale=(1600, 960), ratio_range=(0.5, 2.0), keep_ratio=True),
-    dict(type='RandomFlip', prob=0.5, direction='horizontal'),
-    dict(type='RandomRotate', max_angle=10, pad_with_fixed_color=True),
+    #dict(type='RandomRotate', max_angle=10, pad_with_fixed_color=True),
     dict(type='TextDetRandomCrop', target_size=(960, 960)),
-    dict(type='ColorJitter', brightness=0.2, contrast=0.2, saturation=0.2),
-    dict(type='Normalize', mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True),
-    dict(type='PackTextDetInputs')
+    #dict(type='ColorJitter', brightness=0.2, contrast=0.2, saturation=0.2),
+    dict(
+        type='TorchVisionWrapper',
+        op='ColorJitter',
+        brightness=0.2,
+        contrast=0.2,
+        saturation=0.2
+    ),
+    dict(type='RandomFlip', prob=0.5, direction='horizontal'),
+    dict(type='Resize', scale=(960, 960), keep_ratio=False),
+    dict(
+        type='PackTextDetInputs',
+        meta_keys=('img_path', 'ori_shape', 'img_shape', 'scale_factor')
+    )
 ]
 
 test_pipeline = [
     dict(type='LoadImageFromFile'),
     dict(type='Resize', scale=(1920, 1152), keep_ratio=True),
-    dict(type='Normalize', mean=[123.675, 116.28, 103.53], std=[58.395, 57.12, 57.375], to_rgb=True),
-    dict(type='LoadOCRAnnotations', with_bbox=True, with_mask=True, with_label=False),
-    dict(type='PackTextDetInputs')
+    dict(type='LoadOCRAnnotations', with_bbox=True, with_polygon=True, with_label=True),
+    dict(type='PackTextDetInputs'),
 ]
 
 # ----------------------
-# Dataset (Total-Text)
+# Dataset (ICDAR2015) – use base datasets, override pipelines
 # ----------------------
-# Expected layout:
-# data/totaltext/
-#   images/train/*.jpg
-#   images/test/*.jpg
-#   annotations/train.json   # MMOCR TextDet JSON (polygons)
-#   annotations/test.json
-dataset_type = 'TextDetDataset'
-data_root = 'data/totaltext/'
+icdar2015_textdet_train = _base_.icdar2015_textdet_train
+icdar2015_textdet_train.pipeline = train_pipeline
+
+icdar2015_textdet_test = _base_.icdar2015_textdet_test
+icdar2015_textdet_test.pipeline = test_pipeline
 
 train_dataloader = dict(
-    batch_size=4, num_workers=4, persistent_workers=True,
-    dataset=dict(
-        type=dataset_type,
-        data_root=data_root,
-        data_prefix=dict(img_path='images/train/'),
-        ann_file='annotations/train.json',
-        filter_cfg=dict(filter_empty_gt=True, min_size=8),
-        pipeline=train_pipeline)
+    batch_size=16,
+    num_workers=2,
+    persistent_workers=False,
+    sampler=dict(type='DefaultSampler', shuffle=True),
+    dataset=icdar2015_textdet_train,
 )
 
 val_dataloader = dict(
-    batch_size=1, num_workers=2, persistent_workers=False,
-    dataset=dict(
-        type=dataset_type,
-        data_root=data_root,
-        data_prefix=dict(img_path='images/test/'),
-        ann_file='annotations/test.json',
-        pipeline=test_pipeline)
+    batch_size=1,
+    num_workers=2,
+    persistent_workers=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=icdar2015_textdet_test,
 )
-test_dataloader = val_dataloader
+val_cfg = dict(type='ValLoop')
+val_evaluator = dict(type='HmeanIOUMetric')
 
-# Polygon-level H-mean (IoU-based) is standard for curved text sets
-val_evaluator = dict(type='HmeanIOUMetric', metric='hmean-iou')
-test_evaluator = val_evaluator
+test_dataloader = dict(
+    batch_size=1,
+    num_workers=2,
+    persistent_workers=False,
+    sampler=dict(type='DefaultSampler', shuffle=False),
+    dataset=icdar2015_textdet_test,
+)
+test_cfg = dict(type='TestLoop')
+test_evaluator = dict(type='HmeanIOUMetric')
 
 # ----------------------
 # Optim & Schedule (800 epochs)
@@ -123,21 +139,22 @@ optim_wrapper = dict(
         custom_keys={
             'absolute_pos_embed': dict(decay_mult=0.0),
             'relative_position_bias_table': dict(decay_mult=0.0),
-            'norm': dict(decay_mult=0.0)
+            'norm': dict(decay_mult=0.0),
         })
 )
 
 param_scheduler = [
     dict(type='LinearLR', start_factor=0.001, by_epoch=False, begin=0, end=1500),
-    dict(type='CosineAnnealingLR', by_epoch=True, begin=0, end=800, T_max=800, eta_min=1e-6)
+    dict(type='CosineAnnealingLR', by_epoch=True, begin=0, end=800, T_max=800, eta_min=1e-6),
 ]
 
 train_cfg = dict(type='EpochBasedTrainLoop', max_epochs=800, val_interval=20)
 
 default_hooks = dict(
     checkpoint=dict(type='CheckpointHook', interval=20, save_best='hmean-iou/hmean'),
-    logger=dict(type='LoggerHook', interval=50)
+    logger=dict(type='LoggerHook', interval=50),
 )
 
-# Repro
 randomness = dict(seed=None, deterministic=False)
+
+# Optional: work_dir = './work_dirs/dbnet_swin_t_icdar2015'
